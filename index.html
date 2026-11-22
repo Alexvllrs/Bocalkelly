@@ -8,6 +8,11 @@
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
     overscroll-behavior: none; touch-action: none; -webkit-user-select: none; user-select: none; }
   canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+  #motion {
+    display: none; position: fixed; top: 22px; left: 50%; transform: translateX(-50%); z-index: 2;
+    background: none; border: 1px solid #5a6a2a; color: #d6ff5a; border-radius: 6px;
+    font: 13px "Courier New", monospace; letter-spacing: 1px; padding: 10px 14px;
+  }
   #hint {
     position: fixed; left: 0; right: 0; bottom: 22px; text-align: center;
     font: 12px "Courier New", monospace; color: #8a8f6a; letter-spacing: 1px; line-height: 1.7;
@@ -17,6 +22,7 @@
 </head>
 <body>
 <canvas id="c"></canvas>
+<button id="motion">[ activer le secouage ]</button>
 <div id="hint">[ secoue le bocal ]<br>[ glisse le couvercle &rarr; ]</div>
 <script>
 (() => {
@@ -164,15 +170,25 @@
   }
 
   // ---------- capteurs de mouvement (vrai secouage du téléphone) ----------
-  let motionAsked = false;
+  // iPhone : l'autorisation doit être demandée pendant un vrai "tap" (click / touchend), pas un pointerdown
+  const needsPermission = typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function';
+  const motionBtn = document.getElementById('motion');
+  let motionOk = !needsPermission;
   function askMotion() {
-    if (motionAsked) return; motionAsked = true;
+    if (motionOk) return;
     try {
-      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-        DeviceMotionEvent.requestPermission().catch(() => {});
-      }
+      DeviceMotionEvent.requestPermission().then((r) => {
+        if (r === 'granted') { motionOk = true; motionBtn.style.display = 'none'; }
+        else motionBtn.textContent = '[ mouvement refusé : réglages > safari ]';
+      }).catch(() => {});
     } catch (e) {}
   }
+  if (needsPermission) {
+    motionBtn.style.display = 'block';
+    motionBtn.addEventListener('click', (e) => { e.stopPropagation(); askMotion(); });
+  }
+  canvas.addEventListener('click', askMotion);
+  canvas.addEventListener('touchend', askMotion);
   let lastG = null;
   window.addEventListener('devicemotion', (e) => {
     if (state !== 'jar') return;
@@ -198,7 +214,6 @@
     return { x: RX + jar.x - lw / 2 + lid.dx, y: RY + jar.y + mouthY - lidH, w: lw, h: lidH };
   }
   canvas.addEventListener('pointerdown', (e) => {
-    askMotion();
     if (state === 'text' && time - tOpen > 4) { reset(); return; }
     if (state !== 'jar') return;
     canvas.setPointerCapture(e.pointerId);
