@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Bocal de lucioles</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+    overscroll-behavior: none; touch-action: none; -webkit-user-select: none; user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+  #hint {
+    position: fixed; left: 0; right: 0; bottom: 22px; text-align: center;
+    font: 12px "Courier New", monospace; color: #8a8f6a; letter-spacing: 1px; line-height: 1.7;
+    pointer-events: none; transition: opacity 1.2s;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">[ secoue le bocal ]<br>[ glisse le couvercle &rarr; ]</div>
+<script>
+(() => {
+  const MESSAGE = ['ILY', 'Kelly'];
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const off = document.createElement('canvas');
+  const octx = off.getContext('2d', { willReadFrequently: true });
+  const hint = document.getElementById('hint');
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const rand = (a, b) => a + Math.random() * (b - a);
+  function hash(a, b) {
+    let h = Math.imul(a, 374761393) + Math.imul(b, 668265263);
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  }
+  const LEVELS = [".,'`", ":;-~_", "=+<>!ir", "*xoclvz", "#%&8kqpd", "@$WMBNQ0"];
+
+  // ---------- mise en page ----------
+  let W, H, dpr, cw, ch, fs, cols, rows, stars = [];
+  let jarW, jarH, RX, RY, bodyTop, bodyBot, neckH, lidH, mouthY;
+
+  function layout() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    cw = clamp(Math.min(W, H) / 140, 2.6, 5.5);
+    fs = cw / 0.6; ch = fs * 0.9;
+    cols = Math.ceil(W / cw); rows = Math.ceil(H / ch);
+    off.width = cols; off.height = rows;
+
+    jarW = Math.min(W * 0.56, H * 0.32);
+    jarH = jarW * 1.3;
+    RX = W / 2; RY = H * 0.52;
+    neckH = jarH * 0.1; lidH = jarH * 0.11;
+    bodyTop = -jarH / 2 + neckH;   // coordonnées locales du bocal (centre = 0,0)
+    bodyBot = jarH / 2;
+    mouthY = -jarH / 2;
+
+    stars = [];
+    const n = Math.floor(cols * rows / 140);
+    for (let i = 0; i < n; i++) {
+      stars.push({ c: Math.floor(Math.random() * cols), r: Math.floor(Math.random() * rows),
+        ph: Math.random() * 6.28, sp: 0.5 + Math.random() * 2,
+        ch: Math.random() < 0.8 ? '.' : (Math.random() < 0.6 ? '+' : '*') });
+    }
+    if (state === 'text' || state === 'opening') buildTargets(true);
+  }
+
+  // ---------- état ----------
+  let state = 'jar';           // 'jar' -> 'opening' -> 'text'
+  let tOpen = 0, time = 0;
+  const jar = { x: 0, y: 0, vx: 0, vy: 0, fall: 0, fallV: 0, pvx: 0, pvy: 0 };
+  const lid = { dx: 0, dy: 0, rot: 0, vx: 0, vy: 0, vr: 0, free: false };
+  let flies = [];
+  let targets = [];
+
+  function makeJarFlies() {
+    flies = [];
+    const n = 34;
+    for (let i = 0; i < n; i++) {
+      flies.push({
+        x: rand(-jarW * 0.35, jarW * 0.35), y: rand(bodyTop + 20, bodyBot - 20),
+        vx: rand(-20, 20), vy: rand(-20, 20),
+        ph: Math.random() * 6.28, sp: rand(1.2, 3.2), ex: 0,
+        inJar: true,
+      });
+    }
+  }
+
+  function reset() {
+    state = 'jar';
+    Object.assign(jar, { x: 0, y: 0, vx: 0, vy: 0, fall: 0, fallV: 0, pvx: 0, pvy: 0 });
+    Object.assign(lid, { dx: 0, dy: 0, rot: 0, vx: 0, vy: 0, vr: 0, free: false });
+    makeJarFlies();
+    hint.innerHTML = '[ secoue le bocal ]<br>[ glisse le couvercle &rarr; ]';
+    hint.style.opacity = 1;
+  }
+
+  // Points du message, échantillonnés sur un texte dessiné hors écran
+  function buildTargets(keepAssignment) {
+    const t = document.createElement('canvas');
+    t.width = W; t.height = H;
+    const g = t.getContext('2d');
+    let size = Math.min(W * 0.27, H * 0.24);
+    const font = s => `900 ${s}px "Arial Black", "Helvetica Neue", Arial, sans-serif`;
+    g.font = font(size);
+    const widest = Math.max(...MESSAGE.map(m => g.measureText(m).width));
+    size *= Math.min(1, (W * 0.86) / widest);
+    g.font = font(size);
+    g.fillStyle = '#fff'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    const lh = size * 1.08;
+    const y0 = H * 0.46 - (MESSAGE.length - 1) * lh / 2;
+    MESSAGE.forEach((m, i) => g.fillText(m, W / 2, y0 + i * lh));
+    const data = g.getImageData(0, 0, W, H).data;
+    let sp = Math.max(cw * 1.45, size / 15);
+    let pts;
+    for (let k = 0; k < 8; k++) {
+      pts = [];
+      for (let y = 0; y < H; y += sp) {
+        const off = (Math.round(y / sp) % 2) * sp / 2;
+        for (let x = off; x < W; x += sp) {
+          if (data[(Math.floor(y) * W + Math.floor(x)) * 4 + 3] > 140)
+            pts.push([x + rand(-sp, sp) * 0.15, y + rand(-sp, sp) * 0.15]);
+        }
+      }
+      if (pts.length <= 650) break;
+      sp *= 1.12;
+    }
+    for (let i = pts.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1)); [pts[i], pts[j]] = [pts[j], pts[i]];
+    }
+    targets = pts;
+    if (keepAssignment) flies.forEach((f, i) => { if (targets[i % targets.length]) { f.tx = targets[i % targets.length][0]; f.ty = targets[i % targets.length][1]; } });
+  }
+
+  function openJar(speed) {
+    state = 'opening';
+    tOpen = time;
+    lid.free = true;
+    lid.vx = Math.max(900, speed || 0); lid.vy = -380; lid.vr = 7;
+    hint.style.opacity = 0;
+    buildTargets(false);
+    // les lucioles du bocal passent en coordonnées écran
+    flies.forEach((f, i) => {
+      f.x += RX + jar.x; f.y += RY + jar.y;
+      f.inJar = false;
+      f.rel = time + 0.15 + Math.random() * 0.5;
+      f.tx = targets[i % targets.length][0]; f.ty = targets[i % targets.length][1];
+      f.vy -= rand(120, 260);
+    });
+    // nouvelles lucioles qui s'échappent du goulot
+    for (let i = flies.length; i < targets.length; i++) {
+      flies.push({
+        x: RX + jar.x + rand(-jarW * 0.3, jarW * 0.3), y: RY + jar.y + mouthY,
+        vx: rand(-160, 160), vy: rand(-420, -160),
+        ph: Math.random() * 6.28, sp: rand(1.2, 3.2), ex: 0.6,
+        inJar: false, born: time + 0.1 + (i / targets.length) * 1.3,
+        rel: 0, tx: targets[i][0], ty: targets[i][1],
+      });
+      const f = flies[flies.length - 1]; f.rel = f.born + 0.25 + Math.random() * 0.4;
+    }
+  }
+
+  // ---------- capteurs de mouvement (vrai secouage du téléphone) ----------
+  let motionAsked = false;
+  function askMotion() {
+    if (motionAsked) return; motionAsked = true;
+    try {
+      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+        DeviceMotionEvent.requestPermission().catch(() => {});
+      }
+    } catch (e) {}
+  }
+  let lastG = null;
+  window.addEventListener('devicemotion', (e) => {
+    if (state !== 'jar') return;
+    let ax = 0, ay = 0;
+    if (e.acceleration && e.acceleration.x != null) { ax = e.acceleration.x; ay = e.acceleration.y; }
+    else if (e.accelerationIncludingGravity) {
+      const g = e.accelerationIncludingGravity;
+      if (lastG) { ax = g.x - lastG.x; ay = g.y - lastG.y; }
+      lastG = { x: g.x, y: g.y };
+    }
+    const m = Math.hypot(ax, ay);
+    if (m > 1.5) {
+      const k = Math.min(m, 25) / m;
+      jar.vx += ax * k * 55;
+      jar.vy -= ay * k * 55;
+    }
+  });
+
+  // ---------- doigt / souris ----------
+  let drag = null;
+  function lidRect() {
+    const lw = jarW * 0.86;
+    return { x: RX + jar.x - lw / 2 + lid.dx, y: RY + jar.y + mouthY - lidH, w: lw, h: lidH };
+  }
+  canvas.addEventListener('pointerdown', (e) => {
+    askMotion();
+    if (state === 'text' && time - tOpen > 4) { reset(); return; }
+    if (state !== 'jar') return;
+    canvas.setPointerCapture(e.pointerId);
+    const r = lidRect(), pad = Math.max(28, lidH);
+    if (e.clientX > r.x - pad && e.clientX < r.x + r.w + pad && e.clientY > r.y - pad && e.clientY < r.y + r.h + pad * 0.6) {
+      drag = { kind: 'lid', sx: e.clientX, lx: e.clientX, lt: performance.now(), v: 0 };
+    } else {
+      drag = { kind: 'jar', gx: e.clientX - jar.x, gy: e.clientY - jar.y, tx: jar.x, ty: jar.y };
+    }
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!drag || state !== 'jar') return;
+    if (drag.kind === 'lid') {
+      const now = performance.now();
+      lid.dx = Math.max(0, e.clientX - drag.sx);
+      lid.rot = lid.dx / jarW * 0.35;
+      drag.v = (e.clientX - drag.lx) / Math.max(1, now - drag.lt) * 1000;
+      drag.lx = e.clientX; drag.lt = now;
+    } else {
+      const lim = jarW * 0.5;
+      drag.tx = clamp(e.clientX - drag.gx, -lim, lim);
+      drag.ty = clamp(e.clientY - drag.gy, -lim * 0.6, lim * 0.6);
+    }
+  });
+  function endDrag() {
+    if (!drag) return;
+    if (drag.kind === 'lid' && state === 'jar') {
+      if (lid.dx > jarW * 0.4 || drag.v > 900) openJar(drag.v);
+    }
+    drag = null;
+  }
+  canvas.addEventListener('pointerup', endDrag);
+  canvas.addEventListener('pointercancel', endDrag);
+
+  // ---------- simulation ----------
+  function step(dt) {
+    // bocal : ressort vers sa place, ou vers le doigt
+    if (state === 'jar') {
+      const tx = drag && drag.kind === 'jar' ? drag.tx : 0;
+      const ty = drag && drag.kind === 'jar' ? drag.ty : 0;
+      const k = drag && drag.kind === 'jar' ? 260 : 70;
+      jar.vx += ((tx - jar.x) * k - jar.vx * (drag ? 18 : 7)) * dt;
+      jar.vy += ((ty - jar.y) * k - jar.vy * (drag ? 18 : 7)) * dt;
+      jar.x += jar.vx * dt; jar.y += jar.vy * dt;
+      if (!(drag && drag.kind === 'lid')) { lid.dx *= Math.pow(0.0005, dt); lid.rot *= Math.pow(0.0005, dt); }
+    } else {
+      if (time - tOpen > 0.35) { jar.fallV += 2600 * dt; jar.fall += jar.fallV * dt; }
+    }
+    if (lid.free) {
+      lid.vy += 1800 * dt; lid.dx += lid.vx * dt; lid.dy += lid.vy * dt; lid.rot += lid.vr * dt;
+    }
+    // accélération du bocal -> inertie des lucioles
+    const ax = (jar.vx - jar.pvx) / dt, ay = (jar.vy - jar.pvy) / dt;
+    jar.pvx = jar.vx; jar.pvy = jar.vy;
+
+    const iw = jarW / 2 - cw * 2.2;
+    for (const f of flies) {
+      if (f.inJar) {
+        f.vx += (-ax * 0.9 + rand(-60, 60)) * dt;
+        f.vy += (-ay * 0.9 + rand(-60, 60) - 8) * dt;
+        const sp = Math.hypot(f.vx, f.vy);
+        f.ex = Math.max(f.ex * Math.pow(0.4, dt), clamp((sp - 60) / 400, 0, 1));
+        const maxS = 900;
+        if (sp > maxS) { f.vx *= maxS / sp; f.vy *= maxS / sp; }
+        const damp = sp > 50 ? Math.pow(0.35, dt) : Math.pow(0.9, dt);
+        f.vx *= damp; f.vy *= damp;
+        f.x += f.vx * dt; f.y += f.vy * dt;
+        if (f.x < -iw) { f.x = -iw; f.vx = Math.abs(f.vx) * 0.6; }
+        if (f.x > iw) { f.x = iw; f.vx = -Math.abs(f.vx) * 0.6; }
+        const top = bodyTop + cw * 2.5, bot = bodyBot - cw * 2.5;
+        if (f.y < top) { f.y = top; f.vy = Math.abs(f.vy) * 0.6; }
+        if (f.y > bot) { f.y = bot; f.vy = -Math.abs(f.vy) * 0.6; }
+      } else {
+        if (f.born && time < f.born) continue;
+        const k = clamp((time - f.rel) / 1.6, 0, 1);
+        const hx = f.tx + Math.sin(time * 1.3 + f.ph) * cw * 0.5;
+        const hy = f.ty + Math.cos(time * 1.1 + f.ph * 1.7) * cw * 0.5;
+        f.vx += ((hx - f.x) * 14 * k * k - f.vx * (1.2 + 4 * k) + rand(-90, 90) * (1 - k)) * dt;
+        f.vy += ((hy - f.y) * 14 * k * k - f.vy * (1.2 + 4 * k) + rand(-90, 90) * (1 - k) - 30 * (1 - k)) * dt;
+        f.x += f.vx * dt; f.y += f.vy * dt;
+        f.ex *= Math.pow(0.5, dt);
+      }
+    }
+    if (state === 'opening' && time - tOpen > 3.2) state = 'text';
+    if (state === 'text' && time - tOpen > 6 && hint.style.opacity !== '1') {
+      hint.innerHTML = '[ touche l\'écran pour recommencer ]';
+      hint.style.opacity = 1;
+    }
+  }
+
+  // ---------- dessin (canvas basse résolution) ----------
+  function bodyPath(g) {
+    const w = jarW, r = w * 0.2, x0 = -w / 2, x1 = w / 2;
+    const nw = w * 0.39;
+    g.beginPath();
+    g.moveTo(-nw, mouthY);
+    g.lineTo(-nw, bodyTop - r * 0.15);
+    g.quadraticCurveTo(x0, bodyTop - r * 0.1, x0, bodyTop + r);
+    g.lineTo(x0, bodyBot - r);
+    g.quadraticCurveTo(x0, bodyBot, x0 + r, bodyBot);
+    g.lineTo(x1 - r, bodyBot);
+    g.quadraticCurveTo(x1, bodyBot, x1, bodyBot - r);
+    g.lineTo(x1, bodyTop + r);
+    g.quadraticCurveTo(x1, bodyTop - r * 0.1, nw, bodyTop - r * 0.15);
+    g.lineTo(nw, mouthY);
+  }
+
+  function drawFly(g, x, y, f, scale) {
+    let blink = 0.35 + 0.65 * Math.pow(Math.max(0, Math.sin(time * f.sp + f.ph)), 2);
+    if (!f.inJar) {  // une fois en place dans le message : lueur plus stable
+      const k = clamp((time - f.rel - 1.2) / 1.0, 0, 1);
+      blink = blink * (1 - k) + (0.78 + 0.22 * Math.sin(time * f.sp + f.ph)) * k;
+    }
+    const b = clamp(blink + f.ex, 0, 1.3);
+    const r = cw * (1.3 + 0.9 * b) * scale;
+    const grd = g.createRadialGradient(x, y, 0, x, y, r);
+    grd.addColorStop(0, `rgba(250,255,170,${Math.min(1, 0.55 + b * 0.45)})`);
+    grd.addColorStop(0.35, `rgba(214,255,90,${0.75 * b})`);
+    grd.addColorStop(1, 'rgba(120,220,40,0)');
+    g.fillStyle = grd;
+    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+  }
+
+  function drawJar(g) {
+    const cx = RX + jar.x, cy = RY + jar.y + jar.fall;
+    if (cy - jarH > H + 40) return;
+    g.save();
+    g.translate(cx, cy);
+    // verre (léger voile)
+    bodyPath(g); g.closePath();
+    g.fillStyle = 'rgba(150,200,235,0.17)';
+    g.fill();
+    g.restore();
+
+    // lucioles dans le bocal
+    for (const f of flies) if (f.inJar) drawFly(g, cx + f.x, cy + f.y, f, 1);
+
+    g.save();
+    g.translate(cx, cy);
+    // contour du verre
+    bodyPath(g);
+    g.strokeStyle = 'rgba(175,215,245,0.85)';
+    g.lineWidth = cw * 1.1;
+    g.stroke();
+    // reflets
+    g.strokeStyle = 'rgba(235,248,255,0.7)';
+    g.lineWidth = cw * 1.2;
+    g.beginPath();
+    g.moveTo(-jarW * 0.36, bodyTop + jarH * 0.16);
+    g.lineTo(-jarW * 0.36, bodyBot - jarH * 0.2);
+    g.stroke();
+    g.lineWidth = cw * 0.9;
+    g.beginPath();
+    g.moveTo(-jarW * 0.27, bodyTop + jarH * 0.12);
+    g.lineTo(-jarW * 0.27, bodyTop + jarH * 0.24);
+    g.stroke();
+    // ruban rose noué autour du goulot
+    const nw = jarW * 0.39;
+    g.fillStyle = '#e24aae';
+    g.fillRect(-nw - cw * 0.5, mouthY + neckH * 0.35, nw * 2 + cw, Math.max(ch * 1.1, neckH * 0.35));
+    const bx = nw * 0.45, by = mouthY + neckH * 0.52;
+    g.beginPath();
+    g.moveTo(bx, by); g.lineTo(bx - jarW * 0.12, by - jarW * 0.07); g.lineTo(bx - jarW * 0.12, by + jarW * 0.07); g.closePath();
+    g.moveTo(bx, by); g.lineTo(bx + jarW * 0.12, by - jarW * 0.07); g.lineTo(bx + jarW * 0.12, by + jarW * 0.07); g.closePath();
+    g.fill();
+    g.strokeStyle = '#e24aae'; g.lineWidth = cw * 0.9;
+    g.beginPath(); g.moveTo(bx, by); g.lineTo(bx - jarW * 0.05, by + jarW * 0.16); g.moveTo(bx, by); g.lineTo(bx + jarW * 0.06, by + jarW * 0.15); g.stroke();
+    g.restore();
+  }
+
+  function drawLid(g) {
+    const lw = jarW * 0.86;
+    const cx = RX + jar.x + lid.dx;
+    const cy = RY + jar.y + (lid.free ? 0 : jar.fall) + mouthY - lidH / 2 + lid.dy;
+    if (cx - lw > W + 40 || cy - lw > H + 40) return;
+    g.save();
+    g.translate(cx, cy);
+    g.rotate(lid.rot);
+    const grd = g.createLinearGradient(0, -lidH / 2, 0, lidH / 2);
+    grd.addColorStop(0, '#f4d98a'); grd.addColorStop(0.5, '#c99a3a'); grd.addColorStop(1, '#7a5418');
+    g.fillStyle = grd;
+    const r = lidH * 0.3;
+    g.beginPath();
+    g.moveTo(-lw / 2 + r, -lidH / 2); g.lineTo(lw / 2 - r, -lidH / 2);
+    g.quadraticCurveTo(lw / 2, -lidH / 2, lw / 2, -lidH / 2 + r);
+    g.lineTo(lw / 2, lidH / 2); g.lineTo(-lw / 2, lidH / 2);
+    g.lineTo(-lw / 2, -lidH / 2 + r);
+    g.quadraticCurveTo(-lw / 2, -lidH / 2, -lw / 2 + r, -lidH / 2);
+    g.fill();
+    // stries du couvercle
+    g.strokeStyle = 'rgba(60,35,5,0.9)';
+    g.lineWidth = cw * 0.7;
+    const n = Math.max(6, Math.floor(lw / (cw * 3)));
+    for (let i = 1; i < n; i++) {
+      const x = -lw / 2 + (lw * i) / n;
+      g.beginPath(); g.moveTo(x, -lidH * 0.1); g.lineTo(x, lidH / 2); g.stroke();
+    }
+    g.restore();
+  }
+
+  function renderScene() {
+    octx.setTransform(1, 0, 0, 1, 0, 0);
+    octx.clearRect(0, 0, cols, rows);
+    octx.setTransform(1 / cw, 0, 0, 1 / ch, 0, 0);
+    drawJar(octx);
+    for (const f of flies) {
+      if (f.inJar || (f.born && time < f.born)) continue;
+      drawFly(octx, f.x, f.y, f, 1.05);
+    }
+    drawLid(octx);
+  }
+
+  // ---------- rendu ASCII ----------
+  function draw() {
+    renderScene();
+    const data = octx.getImageData(0, 0, cols, rows).data;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+    ctx.font = `bold ${fs.toFixed(2)}px "Courier New", Courier, monospace`;
+    ctx.textBaseline = 'top';
+
+    for (const st of stars) {
+      const i = (st.r * cols + st.c) * 4;
+      if (data[i + 3] > 20) continue;
+      const a = 0.15 + 0.65 * Math.max(0, Math.sin(time * st.sp + st.ph));
+      ctx.fillStyle = `rgba(200,210,255,${a.toFixed(2)})`;
+      ctx.fillText(st.ch, st.c * cw, st.r * ch);
+    }
+
+    const tick = Math.floor(time * 6);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const i = (r * cols + c) * 4;
+        const a = data[i + 3] / 255;
+        if (a < 0.12) continue;
+        let R = data[i], G = data[i + 1], B = data[i + 2];
+        const lum = (0.299 * R + 0.587 * G + 0.114 * B) / 255;
+        const lvl = clamp(Math.floor((0.25 + lum * 0.9) * Math.min(1, a * 1.25) * LEVELS.length), 0, LEVELS.length - 1);
+        const set = LEVELS[lvl];
+        let hsh = hash(c, r);
+        if (hsh < 0.04) hsh = hash(c + tick, r - tick);
+        const chr = set[Math.floor(hash(c * 3 + 1, r * 7 + 2) * 1000 + hsh * set.length) % set.length];
+        R = Math.min(255, R * 1.12); G = Math.min(255, G * 1.12); B = Math.min(255, B * 1.12);
+        ctx.fillStyle = `rgba(${R | 0},${G | 0},${B | 0},${Math.min(1, a * 1.3).toFixed(2)})`;
+        ctx.fillText(chr, c * cw, r * ch);
+      }
+    }
+  }
+
+  // ---------- boucle ----------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now; time += dt;
+    step(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize', layout);
+  layout();
+  reset();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
